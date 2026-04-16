@@ -1403,7 +1403,7 @@ export default function App() {
       <div style={{display:"flex",flexDirection:"column",minHeight:"100vh"}}>
         <header className="topbar">
           <div className="logo">
-            Grammar<span className="logo-em">Error</span>
+            GKGS<span className="logo-em">------</span>
           </div>
           <div className="topbar-right">
             <button className="btn btn-ghost btn-sm" onClick={() => setDarkMode(!darkMode)}>
