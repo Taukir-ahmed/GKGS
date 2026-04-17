@@ -20,23 +20,40 @@ const DB = {
   },
 
   // Added `subject` parameter to fix the scope issue
-  async listAll(subject) {
-    const url = subject 
-      ? `${SUPABASE_URL}/rest/v1/gkgs?select=file_name&subject=eq.${encodeURIComponent(subject)}`
-      : `${SUPABASE_URL}/rest/v1/gkgs?select=file_name`;
+ async listAll(subject) {
+  const base = subject
+    ? `${SUPABASE_URL}/rest/v1/gkgs?select=file_name&subject=eq.${encodeURIComponent(subject)}`
+    : `${SUPABASE_URL}/rest/v1/gkgs?select=file_name`;
 
-    const res = await fetch(url, { headers: this._h({ Prefer: "return=representation" }) });
-    if (!res.ok) { console.error("listAll error:", await res.text()); return []; }
+  // Paginate to bypass Supabase's default 1000-row limit
+  const PAGE = 1000;
+  let from = 0;
+  let allRows = [];
+
+  while (true) {
+    const res = await fetch(base, {
+      headers: this._h({
+        Prefer: "return=representation",
+        Range: `${from}-${from + PAGE - 1}`,
+        "Range-Unit": "items",
+      }),
+    });
+
+    if (!res.ok) { console.error("listAll error:", await res.text()); break; }
     const rows = await res.json();
-    
-    // Use exact filenames so delete/read operations work correctly later
-    const unique = [...new Set(
-      rows.map(r => r.file_name?.trim()).filter(Boolean)
-    )];
+    if (!Array.isArray(rows) || rows.length === 0) break;
 
-    return unique.map(name => ({ name, size: 0 })); 
-  },
+    allRows = allRows.concat(rows);
+    if (rows.length < PAGE) break; // reached last page
+    from += PAGE;
+  }
 
+  const unique = [...new Set(
+    allRows.map(r => r.file_name?.trim()).filter(Boolean)
+  )];
+
+  return unique.map(name => ({ name, size: 0 }));
+},
   // Added `subject` parameter here as well
   async upload(file, subject) {
     const text     = await file.text();
