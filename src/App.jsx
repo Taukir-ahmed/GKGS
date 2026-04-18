@@ -52,18 +52,30 @@ const DB = {
   },
 
 async getSubjects() {
-  const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/gkgs?select=subject&subject=neq.__seed__`,
-    {
-      headers: this._h({
-        "Range": "0-9999",
-        "Range-Unit": "items",
-      }),
-    }
-  );
-  const data = await res.json();
+  const PAGE = 1000;
+  let from = 0;
+  let allRows = [];
+
+  while (true) {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/gkgs?select=subject`,
+      {
+        headers: this._h({
+          "Range": `${from}-${from + PAGE - 1}`,
+          "Range-Unit": "items",
+        }),
+      }
+    );
+    if (!res.ok) break;
+    const rows = await res.json();
+    if (!Array.isArray(rows) || rows.length === 0) break;
+    allRows = allRows.concat(rows);
+    if (rows.length < PAGE) break;
+    from += PAGE;
+  }
+
   const unique = [...new Set(
-    data.map(d => d.subject).filter(Boolean)
+    allRows.map(r => r.subject).filter(Boolean)
   )];
   return unique;
 },
