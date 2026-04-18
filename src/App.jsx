@@ -1178,6 +1178,9 @@ function Dashboard({ mode, onStartTest, onStartFlash, toast }) {
     "history",
     "polity",
     "economics"
+    "current-affairs"
+  "computer"
+  "geography"
   ]);
   const [selectedSubject, setSelectedSubject] = useState("history");
   const [newSubject, setNewSubject] = useState("");
