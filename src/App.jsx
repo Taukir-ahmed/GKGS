@@ -51,17 +51,22 @@ const DB = {
     return unique.map(name => ({ name, size: 0 }));
   },
 
-  async getSubjects() {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/gkgs?select=subject`, {
-      headers: this._h(),
-    });
-    const data = await res.json();
-    const unique = [...new Set(
-      data.map(d => d.subject).filter(Boolean)
-    )];
-    return unique;
-  },
-
+async getSubjects() {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/gkgs?select=subject&subject=neq.__seed__`,
+    {
+      headers: this._h({
+        "Range": "0-9999",
+        "Range-Unit": "items",
+      }),
+    }
+  );
+  const data = await res.json();
+  const unique = [...new Set(
+    data.map(d => d.subject).filter(Boolean)
+  )];
+  return unique;
+},
   // Insert a seed row so the subject persists even with no real files
   async addSubjectSeed(subject) {
     const res = await fetch(`${SUPABASE_URL}/rest/v1/gkgs`, {
