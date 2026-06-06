@@ -588,7 +588,6 @@ body::before {
 [data-theme="dark"] .mastery-flash { border-color:rgba(255,215,0,0.25); }
 @keyframes pop { from{transform:scale(0.5);opacity:0} to{transform:scale(1);opacity:1} }
 
-.next-row { display:flex; justify-content:flex-end; align-items:center; margin-top:1.5rem; gap:0.75rem; flex-wrap:wrap; }
 .score-nudge { font-family:'DM Mono',monospace; font-size:0.7rem; color:var(--muted); }
 .score-nudge span { color:var(--green); font-weight:600; }
 
@@ -744,22 +743,127 @@ function buildPracticeSet(allQuestions) {
   }));
 }
 
-function MasterySession({ subject, fileName, allQuestions, onExit, toast }) {
-  const topicTitle  = fileName.replace(/\.csv$/i, "");
-  const ids         = allQuestions.map(q => q.id);
-  const sessionRef  = useRef(null); // ref to the session-shell div for scroll-to-top
-
-  const [queue,    setQueue]    = useState([]);   // current 10 questions
-  const [qi,       setQi]       = useState(0);
+// Single question card — fully self-contained, no Next button
+function QuestionCard({ q, qNum, scores, onAnswer }) {
   const [selected, setSelected] = useState(null);
   const [answered, setAnswered] = useState(false);
-  const [scores,   setScores]   = useState({});   // mirrors cache for rendering
-  const [gained,   setGained]   = useState(null);
-  const [saving,   setSaving]   = useState(false);
-  const [genCount, setGenCount] = useState(0);    // how many times generated
-  const pickLock = useRef(false);
+  const [displayScore, setDisplayScore] = useState(ScoreStore.get(q.id));
+  const [gained, setGained]     = useState(false);
+  const lockRef = useRef(false);
 
-  // Seed cache on mount, then generate first set
+  const isRecall     = ScoreStore.get(q.id) >= MASTERY_THRESHOLD;
+  const isCorrect    = answered && selected === q.correct;
+  const justMastered = answered && isCorrect && displayScore >= MASTERY_THRESHOLD && !isRecall;
+
+  const pick = (opt) => {
+    if (lockRef.current || answered) return;
+    lockRef.current = true;
+
+    const scoreBefore = ScoreStore.get(q.id);
+    const correct     = opt === q.correct;
+    setSelected(opt);
+    setAnswered(true);
+
+    if (correct) {
+      const ns = Math.min(scoreBefore + 1, MASTERY_THRESHOLD);
+      ScoreStore._cache[q.id] = ns;
+      setDisplayScore(ns);
+      setGained(true);
+      _patchScore(q.id, ns);
+      onAnswer(q.id, ns);
+    } else {
+      if (!isRecall) {
+        const ns = Math.max(scoreBefore - 1, 0);
+        ScoreStore._cache[q.id] = ns;
+        setDisplayScore(ns);
+        _patchScore(q.id, ns);
+        onAnswer(q.id, ns);
+      }
+    }
+  };
+
+  return (
+    <div className="qcard" style={{ marginBottom: "1.25rem" }}>
+      <div className="q-num-row">
+        <div className="q-num">
+          Q{qNum}
+          {isRecall && (
+            <span style={{
+              padding:"0.12rem 0.5rem", borderRadius:5, fontSize:"0.6rem",
+              background:"var(--gold-bg)", color:"var(--gold)",
+              border:"1px solid rgba(184,134,11,0.3)", fontFamily:"DM Mono,monospace",
+            }}>⭐ Recall</span>
+          )}
+        </div>
+        <ScorePips score={displayScore} newlyGained={answered && isCorrect && gained} />
+      </div>
+
+      <div className="q-text">{q.question}</div>
+
+      <div className="opts">
+        {q.options.map((opt, i) => {
+          let cls = "";
+          if (answered) {
+            if (opt === q.correct) cls = "correct";
+            else if (opt === selected) cls = "wrong";
+          }
+          return (
+            <button key={i} className={`opt ${cls}`} onClick={() => pick(opt)} disabled={answered}>
+              <span className="opt-key">{LETTERS[i]}</span>
+              {opt}
+            </button>
+          );
+        })}
+      </div>
+
+      {answered && (
+        <div className="solution-box">
+          <div className={`solution-head ${isCorrect ? "ok" : "no"}`}>
+            {isCorrect ? "✓ Correct" : "✗ Incorrect"}
+            {justMastered && <span className="mastery-flash" style={{marginLeft:"auto"}}>⭐ Mastered!</span>}
+          </div>
+          <div className={`solution-body ${isCorrect ? "ok" : "no"}`}>
+            {!isCorrect && (
+              <div>Correct answer: <span className="solution-answer">{q.correct}</span></div>
+            )}
+            {q.solution && (
+              <div style={{ marginTop: isCorrect ? 0 : "0.65rem", color:"var(--ink2)" }}>
+                <strong style={{ fontFamily:"DM Mono,monospace", fontSize:"0.68rem", letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)" }}>
+                  Explanation
+                </strong>
+                <p style={{ marginTop:"0.3rem" }}>{q.solution}</p>
+              </div>
+            )}
+            {!isRecall && (
+              <div className="score-nudge" style={{ marginTop:"0.5rem" }}>
+                Score: <span>{displayScore}/{MASTERY_THRESHOLD}</span>
+                {" — "}
+                {displayScore >= MASTERY_THRESHOLD ? "🌟 Mastered!" : `${MASTERY_THRESHOLD - displayScore} more to master`}
+              </div>
+            )}
+            {isRecall && (
+              <div className="score-nudge" style={{ marginTop:"0.5rem", color:"var(--gold)" }}>
+                ⭐ Recall — already mastered. Keep it sharp!
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MasterySession({ subject, fileName, allQuestions, onExit, toast }) {
+  const topicTitle = fileName.replace(/\.csv$/i, "");
+  const ids        = allQuestions.map(q => q.id);
+  const topRef     = useRef(null);
+
+  const [queue,    setQueue]    = useState([]);
+  const [scores,   setScores]   = useState({});
+  const [saving,   setSaving]   = useState(false);
+  // key forces full remount of all QuestionCards on each generate
+  const [genKey,   setGenKey]   = useState(0);
+
   useEffect(() => {
     ScoreStore.seed(allQuestions);
     setScores(ScoreStore.getAll(ids));
@@ -769,125 +873,26 @@ function MasterySession({ subject, fileName, allQuestions, onExit, toast }) {
   function generate() {
     const qs = buildPracticeSet(allQuestions);
     setQueue(qs);
-    setQi(0);
-    setSelected(null);
-    setAnswered(false);
-    setGained(null);
-    pickLock.current = false;
-    setGenCount(c => c + 1);
-    // Scroll back to top of session shell
-    setTimeout(() => sessionRef.current?.scrollTo({ top: 0, behavior: "smooth" }), 50);
+    setGenKey(k => k + 1);
+    // Scroll page to top
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    topRef.current?.scrollIntoView({ behavior: "smooth" });
   }
+
+  // Called by each QuestionCard after answering — update parent scores state
+  const handleAnswer = (id, newScore) => {
+    setScores(prev => ({ ...prev, [id]: newScore }));
+  };
 
   const masteredCount   = ScoreStore.getMasteredCount(ids);
   const unmasteredCount = ids.length - masteredCount;
 
   if (!queue.length) return <div className="spin" />;
 
-  const q = queue[qi];
-  if (!q) return null;
-
-  const currentScore = ScoreStore.get(q.id);
-  const isRecall     = currentScore >= MASTERY_THRESHOLD;  // this is the 1-in-10 mastered slot
-  const isCorrect    = answered && selected === q.correct;
-  const displayScore = answered ? (scores[q.id] ?? currentScore) : currentScore;
-  const justMastered = answered && isCorrect && displayScore >= MASTERY_THRESHOLD && !isRecall;
-  const prog         = ((qi) / queue.length) * 100;
-
-  const pick = async (opt) => {
-    if (pickLock.current || saving) return;
-    pickLock.current = true;
-
-    const scoreBefore = ScoreStore.get(q.id);
-    const correct     = opt === q.correct;
-
-    setSelected(opt);
-    setAnswered(true);
-    setSaving(true);
-
-    if (correct) {
-      const ns = Math.min(scoreBefore + 1, MASTERY_THRESHOLD);
-      ScoreStore._cache[q.id] = ns;
-      setScores(prev => ({ ...prev, [q.id]: ns }));
-      setGained(q.id);
-      _patchScore(q.id, ns);
-    } else {
-      // Don't decrement recall (mastered) questions — they're just review
-      if (!isRecall) {
-        const ns = Math.max(scoreBefore - 1, 0);
-        ScoreStore._cache[q.id] = ns;
-        setScores(prev => ({ ...prev, [q.id]: ns }));
-        _patchScore(q.id, ns);
-      }
-    }
-    setSaving(false);
-  };
-
-  const next = () => {
-    pickLock.current = false;
-    if (qi + 1 >= queue.length) {
-      // End of this set — show a gentle prompt to generate more, don't navigate away
-      setQi(queue.length); // sentinel: renders the "generate next" nudge
-    } else {
-      setQi(i => i + 1);
-      setSelected(null);
-      setAnswered(false);
-      setGained(null);
-    }
-  };
-
-  // Sentinel state: all 10 answered — show generate prompt
-  if (qi >= queue.length) {
-    const masteredNow   = ScoreStore.getMasteredCount(ids);
-    const unmasteredNow = ids.length - masteredNow;
-    return (
-      <div className="session-shell" ref={sessionRef}>
-        <div className="session-topbar">
-          <div>
-            <div className="session-info-label">{subject} › {topicTitle}</div>
-            <div className="session-info-title">Set Complete</div>
-          </div>
-          <button className="btn btn-ghost btn-sm" onClick={onExit}>← Topics</button>
-        </div>
-
-        <div style={{textAlign:"center", padding:"3rem 1rem"}}>
-          <div style={{fontSize:"3rem", marginBottom:"1rem"}}>✅</div>
-          <div style={{fontFamily:"Syne,sans-serif", fontSize:"1.4rem", fontWeight:800, marginBottom:"0.5rem"}}>
-            10 Questions Done
-          </div>
-          <div style={{color:"var(--muted)", fontSize:"0.88rem", marginBottom:"2rem"}}>
-            {masteredNow} mastered · {unmasteredNow} still to go
-          </div>
-
-          <div className="hud" style={{maxWidth:400, margin:"0 auto 2rem"}}>
-            <div className="hud-cell"><div className="hud-val t">{masteredNow}</div><div className="hud-lbl">Mastered</div></div>
-            <div className="hud-cell"><div className="hud-val r">{unmasteredNow}</div><div className="hud-lbl">Remaining</div></div>
-            <div className="hud-cell"><div className="hud-val a">{ids.length}</div><div className="hud-lbl">Total</div></div>
-            <div className="hud-cell"><div className="hud-val g">{genCount}</div><div className="hud-lbl">Sets Done</div></div>
-          </div>
-
-          <button className="btn btn-red" style={{fontSize:"1rem", padding:"0.75rem 2rem"}} onClick={generate}>
-            🎲 Generate Next 10
-          </button>
-          <div style={{marginTop:"1.5rem", display:"flex", gap:"0.75rem", justifyContent:"center", flexWrap:"wrap"}}>
-            <button className="btn btn-ghost" onClick={onExit}>← Back to Topics</button>
-            <button className="btn btn-danger btn-sm" onClick={async () => {
-              if (!window.confirm("Reset all scores for this topic?")) return;
-              setSaving(true);
-              await ScoreStore.reset(ids);
-              setSaving(false);
-              setScores(ScoreStore.getAll(ids));
-              toast("Scores reset!", "info");
-              generate();
-            }} disabled={saving}>{saving ? "…" : "↺ Reset Scores"}</button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="session-shell" ref={sessionRef}>
+    <div className="session-shell">
+      <div ref={topRef} />
+
       {/* TOPBAR */}
       <div className="session-topbar">
         <div>
@@ -897,14 +902,14 @@ function MasterySession({ subject, fileName, allQuestions, onExit, toast }) {
         <button className="btn btn-ghost btn-sm" onClick={onExit}>Exit ✕</button>
       </div>
 
-      {/* GENERATE BUTTON + STATS — always visible at top */}
+      {/* STATS + GENERATE BUTTON */}
       <div style={{
         display:"flex", alignItems:"center", justifyContent:"space-between",
         gap:"0.75rem", flexWrap:"wrap",
         background:"var(--bg4)", border:"1.5px solid var(--border2)",
-        borderRadius:14, padding:"0.85rem 1.1rem", marginBottom:"1.5rem",
+        borderRadius:14, padding:"0.85rem 1.1rem", marginBottom:"2rem",
       }}>
-        <div style={{display:"flex", gap:"1.25rem", flexWrap:"wrap"}}>
+        <div style={{display:"flex", gap:"1.5rem", flexWrap:"wrap"}}>
           <div>
             <div style={{fontFamily:"Syne,sans-serif", fontSize:"1.3rem", fontWeight:800, color:"var(--gold)", lineHeight:1}}>{masteredCount}</div>
             <div style={{fontFamily:"DM Mono,monospace", fontSize:"0.58rem", color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.1em"}}>Mastered</div>
@@ -915,107 +920,47 @@ function MasterySession({ subject, fileName, allQuestions, onExit, toast }) {
           </div>
           <div>
             <div style={{fontFamily:"Syne,sans-serif", fontSize:"1.3rem", fontWeight:800, color:"var(--teal)", lineHeight:1}}>{ids.length}</div>
-            <div style={{fontFamily:"DM Mono,monospace", fontSize:"0.58rem", color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.1em"}}>Total Q</div>
+            <div style={{fontFamily:"DM Mono,monospace", fontSize:"0.58rem", color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.1em"}}>Total</div>
           </div>
         </div>
-        <button className="btn btn-red" onClick={generate} style={{flexShrink:0}}>
-          🎲 Generate 10
+        <div style={{display:"flex", gap:"0.5rem", alignItems:"center", flexWrap:"wrap"}}>
+          <button className="btn btn-danger btn-sm" onClick={async () => {
+            if (!window.confirm("Reset all scores for this topic?")) return;
+            setSaving(true);
+            await ScoreStore.reset(ids);
+            setSaving(false);
+            setScores(ScoreStore.getAll(ids));
+            toast("Scores reset!", "info");
+            generate();
+          }} disabled={saving}>{saving ? "…" : "↺ Reset"}</button>
+          <button className="btn btn-red" onClick={generate}>
+            🎲 Generate 10
+          </button>
+        </div>
+      </div>
+
+      {/* ALL 10 QUESTIONS — rendered together, scroll through them */}
+      {queue.map((q, i) => (
+        <QuestionCard
+          key={`${genKey}-${q.id}-${i}`}
+          q={q}
+          qNum={i + 1}
+          scores={scores}
+          onAnswer={handleAnswer}
+        />
+      ))}
+
+      {/* BOTTOM GENERATE NUDGE — after scrolling through all 10 */}
+      <div style={{
+        textAlign:"center", padding:"2.5rem 1rem",
+        borderTop:"1px dashed var(--border2)", marginTop:"1rem",
+      }}>
+        <div style={{color:"var(--muted)", fontSize:"0.82rem", marginBottom:"1rem"}}>
+          Scrolled through all 10? Generate a fresh set.
+        </div>
+        <button className="btn btn-red" style={{padding:"0.7rem 2rem", fontSize:"0.95rem"}} onClick={generate}>
+          🎲 Generate Next 10
         </button>
-      </div>
-
-      {/* PROGRESS BAR */}
-      <div className="prog-wrap">
-        <div className="prog-bar"><div className="prog-fill" style={{ width: `${prog}%` }} /></div>
-        <div className="prog-label">
-          <span>
-            Question {qi + 1} of {queue.length}
-            {isRecall && <span style={{marginLeft:"0.5rem", color:"var(--gold)", fontFamily:"DM Mono,monospace", fontSize:"0.6rem"}}>⭐ RECALL</span>}
-          </span>
-          <span>{Math.round(prog)}%</span>
-        </div>
-      </div>
-
-      {/* QUESTION CARD */}
-      <div className="qcard">
-        <div className="q-num-row">
-          <div className="q-num">
-            Q{qi + 1}
-            {isRecall && (
-              <span style={{
-                padding:"0.12rem 0.5rem", borderRadius:5, fontSize:"0.6rem",
-                background:"var(--gold-bg)", color:"var(--gold)",
-                border:"1px solid rgba(184,134,11,0.3)", fontFamily:"DM Mono,monospace",
-              }}>⭐ Recall</span>
-            )}
-            {saving && answered && (
-              <span style={{fontFamily:"DM Mono,monospace", fontSize:"0.6rem", color:"var(--muted)"}}>saving…</span>
-            )}
-          </div>
-          <ScorePips
-            score={displayScore}
-            newlyGained={answered && isCorrect && gained === q.id}
-          />
-        </div>
-
-        <div className="q-text">{q.question}</div>
-
-        <div className="opts">
-          {q.options.map((opt, i) => {
-            let cls = "";
-            if (answered) {
-              if (opt === q.correct) cls = "correct";
-              else if (opt === selected) cls = "wrong";
-            }
-            return (
-              <button key={i} className={`opt ${cls}`} onClick={() => pick(opt)} disabled={answered || saving}>
-                <span className="opt-key">{LETTERS[i]}</span>
-                {opt}
-              </button>
-            );
-          })}
-        </div>
-
-        {answered && (
-          <div className="solution-box">
-            <div className={`solution-head ${isCorrect ? "ok" : "no"}`}>
-              {isCorrect ? "✓ Correct" : "✗ Incorrect"}
-              {justMastered && <span className="mastery-flash" style={{marginLeft:"auto"}}>⭐ Mastered!</span>}
-            </div>
-            <div className={`solution-body ${isCorrect ? "ok" : "no"}`}>
-              {!isCorrect && (
-                <div>Correct answer: <span className="solution-answer">{q.correct}</span></div>
-              )}
-              {q.solution && (
-                <div style={{ marginTop: isCorrect ? 0 : "0.65rem", color:"var(--ink2)" }}>
-                  <strong style={{ fontFamily:"DM Mono,monospace", fontSize:"0.68rem", letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)" }}>
-                    Explanation
-                  </strong>
-                  <p style={{ marginTop:"0.3rem" }}>{q.solution}</p>
-                </div>
-              )}
-              {!isRecall && (
-                <div className="score-nudge" style={{ marginTop:"0.5rem" }}>
-                  Score: <span>{displayScore}/{MASTERY_THRESHOLD}</span>
-                  {" — "}
-                  {displayScore >= MASTERY_THRESHOLD ? "🌟 Mastered!" : `${MASTERY_THRESHOLD - displayScore} more to master`}
-                </div>
-              )}
-              {isRecall && (
-                <div className="score-nudge" style={{ marginTop:"0.5rem", color:"var(--gold)" }}>
-                  ⭐ Recall question — already mastered. Keep it sharp!
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        <div className="next-row">
-          {answered && (
-            <button className="btn btn-red" onClick={next}>
-              {qi + 1 >= queue.length ? "Finish Set →" : "Next →"}
-            </button>
-          )}
-        </div>
       </div>
     </div>
   );
