@@ -746,7 +746,8 @@ function MasterySession({ subject, fileName, allQuestions, onExit, toast }) {
   const [roundWrong,   setRoundWrong]   = useState(0);
   const [retries,   setRetries]   = useState(new Set());
   const [saving,    setSaving]    = useState(false);
-  const queue = useRef([]);
+  const queue    = useRef([]);
+  const pickLock = useRef(false);  // instant guard — prevents double-fire before state settles
 
   // Seed ScoreStore cache from the questions already loaded (score field from DB)
   useEffect(() => {
@@ -768,6 +769,7 @@ function MasterySession({ subject, fileName, allQuestions, onExit, toast }) {
     setQi(0); setSelected(null); setAnswered(false);
     setResults([]); setRoundCorrect(0); setRoundWrong(0);
     setRetries(new Set()); setGained(null); setDone(false);
+    pickLock.current = false;
   }
 
   if (!session) return <div className="spin" />;
@@ -908,7 +910,8 @@ function MasterySession({ subject, fileName, allQuestions, onExit, toast }) {
   const prog = (qi / qs.length) * 100;
 
   const pick = async (opt) => {
-    if (answered || saving) return;
+    if (pickLock.current || saving) return;  // ref check is instant, no async gap
+    pickLock.current = true;
     setSelected(opt);
     setAnswered(true);
     setSaving(true);
@@ -936,6 +939,7 @@ function MasterySession({ subject, fileName, allQuestions, onExit, toast }) {
   };
 
   const next = () => {
+    pickLock.current = false;
     const nextQi = qi + 1;
     if (nextQi >= queue.current.length) {
       setDone(true);
