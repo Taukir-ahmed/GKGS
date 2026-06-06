@@ -900,39 +900,47 @@ function MasterySession({ subject, fileName, allQuestions, onExit, toast }) {
   const q  = qs[qi];
   if (!q) return null;
 
-  const currentScore = scores[q.id] ?? 0;
+  // Always read score from cache directly — never from stale React state
+  const currentScore = ScoreStore.get(q.id);
   const isRetry    = retries.has(q.id);
   const isCorrect  = answered && selected === q.correct;
-  const isMastered = answered && isCorrect && (currentScore + 1) >= MASTERY_THRESHOLD;
-  const newScore   = answered
-    ? (isCorrect ? Math.min(currentScore + 1, MASTERY_THRESHOLD) : Math.max(currentScore - 1, 0))
-    : currentScore;
+  // displayScore: after answering, read the post-patch cache value via scores state
+  // (scores state is set to cache value inside pick, so it reflects the real new score)
+  const displayScore = answered ? (scores[q.id] ?? currentScore) : currentScore;
+  const isMastered = answered && isCorrect && displayScore >= MASTERY_THRESHOLD;
   const prog = (qi / qs.length) * 100;
 
   const pick = async (opt) => {
     if (pickLock.current || saving) return;  // ref check is instant, no async gap
     pickLock.current = true;
+
+    // Snapshot score BEFORE any async work — from cache, not stale state
+    const scoreBefore = ScoreStore.get(q.id);
+    const correct = opt === q.correct;
+
     setSelected(opt);
     setAnswered(true);
     setSaving(true);
 
-    const correct = opt === q.correct;
     if (correct) {
-      const ns = await ScoreStore.increment(q.id);
-      setScores(prev => ({ ...prev, [q.id]: ns }));
+      const ns = Math.min(scoreBefore + 1, MASTERY_THRESHOLD);
+      ScoreStore._cache[q.id] = ns;          // update cache synchronously
+      setScores(prev => ({ ...prev, [q.id]: ns }));  // sync UI immediately
       setGained(q.id);
       setRoundCorrect(c => c + 1);
       setRetries(s => { const n = new Set(s); n.delete(q.id); return n; });
+      _patchScore(q.id, ns);                 // fire-and-forget to DB
     } else {
-      const ns = await ScoreStore.decrement(q.id);
+      const ns = Math.max(scoreBefore - 1, 0);
+      ScoreStore._cache[q.id] = ns;
       setScores(prev => ({ ...prev, [q.id]: ns }));
       if (!isRetry) setRoundWrong(w => w + 1);
-      // Re-insert this question 2–4 positions ahead in the queue
       const rest = qs.slice(qi + 1);
       const at   = Math.min(2 + Math.floor(Math.random() * 3), rest.length);
       rest.splice(at, 0, { ...q, options: shuffle([q.optionA, q.optionB, q.optionC, q.optionD].filter(Boolean)) });
       queue.current = [...qs.slice(0, qi + 1), ...rest];
       setRetries(s => new Set([...s, q.id]));
+      _patchScore(q.id, ns);                 // fire-and-forget to DB
     }
     setResults(prev => [...prev, { id: q.id, question: q.question, correct }]);
     setSaving(false);
@@ -984,7 +992,7 @@ function MasterySession({ subject, fileName, allQuestions, onExit, toast }) {
             {saving && answered && <span style={{fontFamily:"DM Mono,monospace",fontSize:"0.6rem",color:"var(--muted)"}}>saving…</span>}
           </div>
           <ScorePips
-            score={answered ? newScore : currentScore}
+            score={displayScore}
             newlyGained={answered && isCorrect && gained === q.id}
           />
         </div>
@@ -1026,9 +1034,9 @@ function MasterySession({ subject, fileName, allQuestions, onExit, toast }) {
                 </div>
               )}
               <div className="score-nudge" style={{ marginTop: "0.5rem" }}>
-                Score: <span>{newScore}/{MASTERY_THRESHOLD}</span>
+                Score: <span>{displayScore}/{MASTERY_THRESHOLD}</span>
                 {" — "}
-                {newScore >= MASTERY_THRESHOLD ? "🌟 Mastered!" : `${MASTERY_THRESHOLD - newScore} more to master`}
+                {displayScore >= MASTERY_THRESHOLD ? "🌟 Mastered!" : `${MASTERY_THRESHOLD - displayScore} more to master`}
               </div>
             </div>
           </div>
