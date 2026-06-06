@@ -240,40 +240,6 @@ function shuffle(arr) {
   return a;
 }
 
-function buildSession(allQuestions) {
-  // Scores come from ScoreStore cache (seeded from DB on topic load)
-  const unmastered = allQuestions.filter(q => ScoreStore.get(q.id) < MASTERY_THRESHOLD);
-
-  if (unmastered.length === 0) return { questions: [], allMastered: true };
-
-  // Weight lower-score questions more heavily
-  const weighted = [];
-  for (const q of unmastered) {
-    const remaining = MASTERY_THRESHOLD - ScoreStore.get(q.id);
-    for (let i = 0; i < remaining; i++) weighted.push(q);
-  }
-
-  const pool = shuffle(weighted);
-  const seen = new Set();
-  const picked = [];
-  for (const q of pool) {
-    if (!seen.has(q.id)) {
-      seen.add(q.id);
-      picked.push({ ...q, options: shuffle([q.optionA, q.optionB, q.optionC, q.optionD].filter(Boolean)) });
-    }
-    if (picked.length === SESSION_SIZE) break;
-  }
-  // Pad with repeats if fewer than SESSION_SIZE unmastered questions exist
-  if (picked.length < SESSION_SIZE && unmastered.length > 0) {
-    const extra = shuffle(unmastered);
-    for (const q of extra) {
-      if (picked.length >= SESSION_SIZE) break;
-      picked.push({ ...q, options: shuffle([q.optionA, q.optionB, q.optionC, q.optionD].filter(Boolean)) });
-    }
-  }
-  return { questions: picked, allMastered: false };
-}
-
 // ============================================================
 // TOAST
 // ============================================================
@@ -726,197 +692,114 @@ function ScorePips({ score, newlyGained = false }) {
 }
 
 // ============================================================
-// MASTERY SESSION ENGINE
+// MASTERY SESSION ENGINE — infinite practice, no round endings
 // ============================================================
 const LETTERS = ["A", "B", "C", "D"];
 
+// Build a fresh 10-question set:
+// — 9 slots: unmastered questions, weighted by distance from mastery
+// — 1 slot : a random mastered question (recall reinforcement), if any exist
+function buildPracticeSet(allQuestions) {
+  const mastered   = allQuestions.filter(q => ScoreStore.get(q.id) >= MASTERY_THRESHOLD);
+  const unmastered = allQuestions.filter(q => ScoreStore.get(q.id) <  MASTERY_THRESHOLD);
+
+  // Weight unmastered by how far they are from mastery
+  const weighted = [];
+  for (const q of unmastered) {
+    const gap = MASTERY_THRESHOLD - ScoreStore.get(q.id);
+    for (let i = 0; i < gap; i++) weighted.push(q);
+  }
+
+  const pool = shuffle(weighted);
+  const seen = new Set();
+  const picked = [];
+
+  // Fill up to 9 unique unmastered questions
+  for (const q of pool) {
+    if (!seen.has(q.id)) { seen.add(q.id); picked.push(q); }
+    if (picked.length === SESSION_SIZE - 1) break;
+  }
+
+  // If fewer than 9 unmastered, pad with repeats
+  if (picked.length < SESSION_SIZE - 1 && unmastered.length > 0) {
+    const extra = shuffle(unmastered);
+    for (const q of extra) {
+      if (picked.length >= SESSION_SIZE - 1) break;
+      picked.push(q);
+    }
+  }
+
+  // Slot 10: insert 1 mastered question for recall (if any exist)
+  if (mastered.length > 0) {
+    const recall = mastered[Math.floor(Math.random() * mastered.length)];
+    // Insert at a random position so it doesn't always appear last
+    const insertAt = Math.floor(Math.random() * (picked.length + 1));
+    picked.splice(insertAt, 0, recall);
+  }
+
+  // Re-shuffle options for each selected question
+  return picked.map(q => ({
+    ...q,
+    options: shuffle([q.optionA, q.optionB, q.optionC, q.optionD].filter(Boolean)),
+  }));
+}
+
 function MasterySession({ subject, fileName, allQuestions, onExit, toast }) {
-  const topicTitle = fileName.replace(/\.csv$/i, "");
+  const topicTitle  = fileName.replace(/\.csv$/i, "");
+  const ids         = allQuestions.map(q => q.id);
+  const sessionRef  = useRef(null); // ref to the session-shell div for scroll-to-top
 
-  const [session,   setSession]   = useState(null);
-  const [qi,        setQi]        = useState(0);
-  const [selected,  setSelected]  = useState(null);
-  const [answered,  setAnswered]  = useState(false);
-  // scores mirror ScoreStore cache for rendering — updated after each answer
-  const [scores,    setScores]    = useState({});
-  const [gained,    setGained]    = useState(null);
-  const [results,   setResults]   = useState([]);
-  const [done,      setDone]      = useState(false);
-  const [roundCorrect, setRoundCorrect] = useState(0);
-  const [roundWrong,   setRoundWrong]   = useState(0);
-  const [retries,   setRetries]   = useState(new Set());
-  const [saving,    setSaving]    = useState(false);
-  const queue    = useRef([]);
-  const pickLock = useRef(false);  // instant guard — prevents double-fire before state settles
+  const [queue,    setQueue]    = useState([]);   // current 10 questions
+  const [qi,       setQi]       = useState(0);
+  const [selected, setSelected] = useState(null);
+  const [answered, setAnswered] = useState(false);
+  const [scores,   setScores]   = useState({});   // mirrors cache for rendering
+  const [gained,   setGained]   = useState(null);
+  const [saving,   setSaving]   = useState(false);
+  const [genCount, setGenCount] = useState(0);    // how many times generated
+  const pickLock = useRef(false);
 
-  // Seed ScoreStore cache from the questions already loaded (score field from DB)
+  // Seed cache on mount, then generate first set
   useEffect(() => {
     ScoreStore.seed(allQuestions);
-    const initialScores = ScoreStore.getAll(allQuestions.map(q => q.id));
-    setScores(initialScores);
-    startNewRound();
+    setScores(ScoreStore.getAll(ids));
+    generate();
   }, []);
 
-  function startNewRound() {
-    const { questions, allMastered } = buildSession(allQuestions);
-    if (allMastered) {
-      setSession({ questions: [], allMastered: true });
-      setDone(true);
-      return;
-    }
-    queue.current = questions;
-    setSession({ questions, allMastered: false });
-    setQi(0); setSelected(null); setAnswered(false);
-    setResults([]); setRoundCorrect(0); setRoundWrong(0);
-    setRetries(new Set()); setGained(null); setDone(false);
+  function generate() {
+    const qs = buildPracticeSet(allQuestions);
+    setQueue(qs);
+    setQi(0);
+    setSelected(null);
+    setAnswered(false);
+    setGained(null);
     pickLock.current = false;
+    setGenCount(c => c + 1);
+    // Scroll back to top of session shell
+    setTimeout(() => sessionRef.current?.scrollTo({ top: 0, behavior: "smooth" }), 50);
   }
 
-  if (!session) return <div className="spin" />;
+  const masteredCount   = ScoreStore.getMasteredCount(ids);
+  const unmasteredCount = ids.length - masteredCount;
 
-  if (session.allMastered || (done && session.allMastered)) {
-    const ids = allQuestions.map(q => q.id);
-    return (
-      <div className="session-shell">
-        <div className="session-topbar">
-          <div>
-            <div className="session-info-label">{subject} › {topicTitle}</div>
-            <div className="session-info-title">Mastery Complete</div>
-          </div>
-          <button className="btn btn-ghost btn-sm" onClick={onExit}>← Topics</button>
-        </div>
-        <div className="all-mastered-box">
-          <div className="all-mastered-star">🌟</div>
-          <div className="all-mastered-title">All Questions Mastered!</div>
-          <div className="all-mastered-sub">You've scored {MASTERY_THRESHOLD}/5 on every question in this topic.</div>
-        </div>
-        <div className="results-actions">
-          <button className="btn btn-danger btn-sm" onClick={async () => {
-            if (!window.confirm("Reset all mastery scores for this topic?")) return;
-            setSaving(true);
-            await ScoreStore.reset(ids);
-            setSaving(false);
-            setScores(ScoreStore.getAll(ids));
-            toast("Scores reset!", "info");
-            startNewRound();
-          }} disabled={saving}>
-            {saving ? "Resetting…" : "↺ Reset & Restart"}
-          </button>
-          <button className="btn btn-ghost" onClick={onExit}>← Back to Topics</button>
-        </div>
-      </div>
-    );
-  }
+  if (!queue.length) return <div className="spin" />;
 
-  if (done) {
-    const pct = roundCorrect + roundWrong > 0
-      ? Math.round((roundCorrect / (roundCorrect + roundWrong)) * 100) : 100;
-
-    const grade =
-      pct >= 90 ? "Excellent round! Keep it up. 🏆" :
-      pct >= 70 ? "Good work — almost there! 🌟" :
-      pct >= 50 ? "Solid effort — review the wrong ones. 📖" :
-      "Keep practising — repetition builds memory. ✍️";
-
-    const ids = allQuestions.map(q => q.id);
-    const masteredNow   = ScoreStore.getMasteredCount(ids);
-    const unmasteredNow = ids.length - masteredNow;
-
-    return (
-      <div className="session-shell">
-        <div className="session-topbar">
-          <div>
-            <div className="session-info-label">{subject} › {topicTitle}</div>
-            <div className="session-info-title">Round Complete</div>
-          </div>
-          <button className="btn btn-ghost btn-sm" onClick={onExit}>← Topics</button>
-        </div>
-
-        <div style={{textAlign:"center",padding:"1.5rem 0 0"}}>
-          <div className="results-label">Round Score</div>
-          <div className="results-score">{pct}%</div>
-          <div className="results-grade">{grade}</div>
-        </div>
-
-        <div className="results-grid" style={{marginTop:"1.5rem"}}>
-          <div className="res-box"><div className="res-val" style={{color:"var(--green)"}}>{roundCorrect}</div><div className="res-lbl">Correct</div></div>
-          <div className="res-box"><div className="res-val" style={{color:"var(--red)"}}>{roundWrong}</div><div className="res-lbl">Wrong</div></div>
-          <div className="res-box"><div className="res-val" style={{color:"var(--gold)"}}>{masteredNow}</div><div className="res-lbl">Mastered</div></div>
-          <div className="res-box"><div className="res-val" style={{color:"var(--teal)"}}>{unmasteredNow}</div><div className="res-lbl">Remaining</div></div>
-        </div>
-
-        <div className="summary-list">
-          <div style={{fontFamily:"DM Mono,monospace",fontSize:"0.62rem",letterSpacing:"0.15em",textTransform:"uppercase",color:"var(--muted)",marginBottom:"0.75rem"}}>
-            This Round
-          </div>
-          {results.map((r, i) => {
-            const sc = scores[r.id] ?? 0;
-            const isMastered = sc >= MASTERY_THRESHOLD;
-            return (
-              <div className="summary-item" key={i}>
-                <div className="summary-q">{r.question.length > 60 ? r.question.slice(0, 60) + "…" : r.question}</div>
-                <div className={`summary-result ${r.correct ? "ok" : "no"}`}>{r.correct ? "✓" : "✗"}</div>
-                <div className="summary-pips">
-                  {Array.from({length: MASTERY_THRESHOLD}, (_, pi) => (
-                    <div key={pi} className={`sum-pip ${pi < sc ? (isMastered ? "gold" : "filled") : ""}`} />
-                  ))}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-
-        <div className="results-actions">
-          {unmasteredNow > 0 ? (
-            <button className="btn btn-red" onClick={() => startNewRound()}>
-              Next Round ({unmasteredNow} left) →
-            </button>
-          ) : (
-            <button className="btn btn-green" onClick={() => startNewRound()}>
-              🌟 All Mastered! Restart →
-            </button>
-          )}
-          <button className="btn btn-ghost" onClick={onExit}>← Topics</button>
-          {masteredNow > 0 && (
-            <button className="btn btn-danger btn-xs" onClick={async () => {
-              if (!window.confirm("Reset all mastery scores?")) return;
-              const ids2 = allQuestions.map(q => q.id);
-              setSaving(true);
-              await ScoreStore.reset(ids2);
-              setSaving(false);
-              setScores(ScoreStore.getAll(ids2));
-              toast("Scores reset!", "info");
-              startNewRound();
-            }} disabled={saving}>
-              {saving ? "…" : "↺ Reset"}
-            </button>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  const qs = queue.current;
-  const q  = qs[qi];
+  const q = queue[qi];
   if (!q) return null;
 
-  // Always read score from cache directly — never from stale React state
   const currentScore = ScoreStore.get(q.id);
-  const isRetry    = retries.has(q.id);
-  const isCorrect  = answered && selected === q.correct;
-  // displayScore: after answering, read the post-patch cache value via scores state
-  // (scores state is set to cache value inside pick, so it reflects the real new score)
+  const isRecall     = currentScore >= MASTERY_THRESHOLD;  // this is the 1-in-10 mastered slot
+  const isCorrect    = answered && selected === q.correct;
   const displayScore = answered ? (scores[q.id] ?? currentScore) : currentScore;
-  const isMastered = answered && isCorrect && displayScore >= MASTERY_THRESHOLD;
-  const prog = (qi / qs.length) * 100;
+  const justMastered = answered && isCorrect && displayScore >= MASTERY_THRESHOLD && !isRecall;
+  const prog         = ((qi) / queue.length) * 100;
 
   const pick = async (opt) => {
-    if (pickLock.current || saving) return;  // ref check is instant, no async gap
+    if (pickLock.current || saving) return;
     pickLock.current = true;
 
-    // Snapshot score BEFORE any async work — from cache, not stale state
     const scoreBefore = ScoreStore.get(q.id);
-    const correct = opt === q.correct;
+    const correct     = opt === q.correct;
 
     setSelected(opt);
     setAnswered(true);
@@ -924,72 +807,149 @@ function MasterySession({ subject, fileName, allQuestions, onExit, toast }) {
 
     if (correct) {
       const ns = Math.min(scoreBefore + 1, MASTERY_THRESHOLD);
-      ScoreStore._cache[q.id] = ns;          // update cache synchronously
-      setScores(prev => ({ ...prev, [q.id]: ns }));  // sync UI immediately
-      setGained(q.id);
-      setRoundCorrect(c => c + 1);
-      setRetries(s => { const n = new Set(s); n.delete(q.id); return n; });
-      _patchScore(q.id, ns);                 // fire-and-forget to DB
-    } else {
-      const ns = Math.max(scoreBefore - 1, 0);
       ScoreStore._cache[q.id] = ns;
       setScores(prev => ({ ...prev, [q.id]: ns }));
-      if (!isRetry) setRoundWrong(w => w + 1);
-      const rest = qs.slice(qi + 1);
-      const at   = Math.min(2 + Math.floor(Math.random() * 3), rest.length);
-      rest.splice(at, 0, { ...q, options: shuffle([q.optionA, q.optionB, q.optionC, q.optionD].filter(Boolean)) });
-      queue.current = [...qs.slice(0, qi + 1), ...rest];
-      setRetries(s => new Set([...s, q.id]));
-      _patchScore(q.id, ns);                 // fire-and-forget to DB
+      setGained(q.id);
+      _patchScore(q.id, ns);
+    } else {
+      // Don't decrement recall (mastered) questions — they're just review
+      if (!isRecall) {
+        const ns = Math.max(scoreBefore - 1, 0);
+        ScoreStore._cache[q.id] = ns;
+        setScores(prev => ({ ...prev, [q.id]: ns }));
+        _patchScore(q.id, ns);
+      }
     }
-    setResults(prev => [...prev, { id: q.id, question: q.question, correct }]);
     setSaving(false);
   };
 
   const next = () => {
     pickLock.current = false;
-    const nextQi = qi + 1;
-    if (nextQi >= queue.current.length) {
-      setDone(true);
+    if (qi + 1 >= queue.length) {
+      // End of this set — show a gentle prompt to generate more, don't navigate away
+      setQi(queue.length); // sentinel: renders the "generate next" nudge
     } else {
-      setQi(nextQi);
+      setQi(i => i + 1);
       setSelected(null);
       setAnswered(false);
       setGained(null);
     }
   };
 
+  // Sentinel state: all 10 answered — show generate prompt
+  if (qi >= queue.length) {
+    const masteredNow   = ScoreStore.getMasteredCount(ids);
+    const unmasteredNow = ids.length - masteredNow;
+    return (
+      <div className="session-shell" ref={sessionRef}>
+        <div className="session-topbar">
+          <div>
+            <div className="session-info-label">{subject} › {topicTitle}</div>
+            <div className="session-info-title">Set Complete</div>
+          </div>
+          <button className="btn btn-ghost btn-sm" onClick={onExit}>← Topics</button>
+        </div>
+
+        <div style={{textAlign:"center", padding:"3rem 1rem"}}>
+          <div style={{fontSize:"3rem", marginBottom:"1rem"}}>✅</div>
+          <div style={{fontFamily:"Syne,sans-serif", fontSize:"1.4rem", fontWeight:800, marginBottom:"0.5rem"}}>
+            10 Questions Done
+          </div>
+          <div style={{color:"var(--muted)", fontSize:"0.88rem", marginBottom:"2rem"}}>
+            {masteredNow} mastered · {unmasteredNow} still to go
+          </div>
+
+          <div className="hud" style={{maxWidth:400, margin:"0 auto 2rem"}}>
+            <div className="hud-cell"><div className="hud-val t">{masteredNow}</div><div className="hud-lbl">Mastered</div></div>
+            <div className="hud-cell"><div className="hud-val r">{unmasteredNow}</div><div className="hud-lbl">Remaining</div></div>
+            <div className="hud-cell"><div className="hud-val a">{ids.length}</div><div className="hud-lbl">Total</div></div>
+            <div className="hud-cell"><div className="hud-val g">{genCount}</div><div className="hud-lbl">Sets Done</div></div>
+          </div>
+
+          <button className="btn btn-red" style={{fontSize:"1rem", padding:"0.75rem 2rem"}} onClick={generate}>
+            🎲 Generate Next 10
+          </button>
+          <div style={{marginTop:"1.5rem", display:"flex", gap:"0.75rem", justifyContent:"center", flexWrap:"wrap"}}>
+            <button className="btn btn-ghost" onClick={onExit}>← Back to Topics</button>
+            <button className="btn btn-danger btn-sm" onClick={async () => {
+              if (!window.confirm("Reset all scores for this topic?")) return;
+              setSaving(true);
+              await ScoreStore.reset(ids);
+              setSaving(false);
+              setScores(ScoreStore.getAll(ids));
+              toast("Scores reset!", "info");
+              generate();
+            }} disabled={saving}>{saving ? "…" : "↺ Reset Scores"}</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="session-shell">
+    <div className="session-shell" ref={sessionRef}>
+      {/* TOPBAR */}
       <div className="session-topbar">
         <div>
           <div className="session-info-label">{subject} › {topicTitle}</div>
-          <div className="session-info-title">Mastery Mode</div>
+          <div className="session-info-title">Practice</div>
         </div>
         <button className="btn btn-ghost btn-sm" onClick={onExit}>Exit ✕</button>
       </div>
 
-      <div className="hud">
-        <div className="hud-cell"><div className="hud-val g">{roundCorrect}</div><div className="hud-lbl">Correct</div></div>
-        <div className="hud-cell"><div className="hud-val r">{roundWrong}</div><div className="hud-lbl">Wrong</div></div>
-        <div className="hud-cell"><div className="hud-val a">{Math.max(0, qs.length - qi - 1)}</div><div className="hud-lbl">Left</div></div>
-        <div className="hud-cell"><div className="hud-val t">{ScoreStore.getMasteredCount(allQuestions.map(q => q.id))}</div><div className="hud-lbl">Mastered</div></div>
+      {/* GENERATE BUTTON + STATS — always visible at top */}
+      <div style={{
+        display:"flex", alignItems:"center", justifyContent:"space-between",
+        gap:"0.75rem", flexWrap:"wrap",
+        background:"var(--bg4)", border:"1.5px solid var(--border2)",
+        borderRadius:14, padding:"0.85rem 1.1rem", marginBottom:"1.5rem",
+      }}>
+        <div style={{display:"flex", gap:"1.25rem", flexWrap:"wrap"}}>
+          <div>
+            <div style={{fontFamily:"Syne,sans-serif", fontSize:"1.3rem", fontWeight:800, color:"var(--gold)", lineHeight:1}}>{masteredCount}</div>
+            <div style={{fontFamily:"DM Mono,monospace", fontSize:"0.58rem", color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.1em"}}>Mastered</div>
+          </div>
+          <div>
+            <div style={{fontFamily:"Syne,sans-serif", fontSize:"1.3rem", fontWeight:800, color:"var(--red)", lineHeight:1}}>{unmasteredCount}</div>
+            <div style={{fontFamily:"DM Mono,monospace", fontSize:"0.58rem", color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.1em"}}>Remaining</div>
+          </div>
+          <div>
+            <div style={{fontFamily:"Syne,sans-serif", fontSize:"1.3rem", fontWeight:800, color:"var(--teal)", lineHeight:1}}>{ids.length}</div>
+            <div style={{fontFamily:"DM Mono,monospace", fontSize:"0.58rem", color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.1em"}}>Total Q</div>
+          </div>
+        </div>
+        <button className="btn btn-red" onClick={generate} style={{flexShrink:0}}>
+          🎲 Generate 10
+        </button>
       </div>
 
+      {/* PROGRESS BAR */}
       <div className="prog-wrap">
         <div className="prog-bar"><div className="prog-fill" style={{ width: `${prog}%` }} /></div>
         <div className="prog-label">
-          <span>Question {qi + 1} of {qs.length}</span>
+          <span>
+            Question {qi + 1} of {queue.length}
+            {isRecall && <span style={{marginLeft:"0.5rem", color:"var(--gold)", fontFamily:"DM Mono,monospace", fontSize:"0.6rem"}}>⭐ RECALL</span>}
+          </span>
           <span>{Math.round(prog)}%</span>
         </div>
       </div>
 
+      {/* QUESTION CARD */}
       <div className="qcard">
         <div className="q-num-row">
           <div className="q-num">
             Q{qi + 1}
-            {isRetry && <span className="retry-badge">↩ Retry</span>}
-            {saving && answered && <span style={{fontFamily:"DM Mono,monospace",fontSize:"0.6rem",color:"var(--muted)"}}>saving…</span>}
+            {isRecall && (
+              <span style={{
+                padding:"0.12rem 0.5rem", borderRadius:5, fontSize:"0.6rem",
+                background:"var(--gold-bg)", color:"var(--gold)",
+                border:"1px solid rgba(184,134,11,0.3)", fontFamily:"DM Mono,monospace",
+              }}>⭐ Recall</span>
+            )}
+            {saving && answered && (
+              <span style={{fontFamily:"DM Mono,monospace", fontSize:"0.6rem", color:"var(--muted)"}}>saving…</span>
+            )}
           </div>
           <ScorePips
             score={displayScore}
@@ -1019,25 +979,32 @@ function MasterySession({ subject, fileName, allQuestions, onExit, toast }) {
           <div className="solution-box">
             <div className={`solution-head ${isCorrect ? "ok" : "no"}`}>
               {isCorrect ? "✓ Correct" : "✗ Incorrect"}
-              {isMastered && <span className="mastery-flash" style={{marginLeft:"auto"}}>⭐ Mastered!</span>}
+              {justMastered && <span className="mastery-flash" style={{marginLeft:"auto"}}>⭐ Mastered!</span>}
             </div>
             <div className={`solution-body ${isCorrect ? "ok" : "no"}`}>
               {!isCorrect && (
                 <div>Correct answer: <span className="solution-answer">{q.correct}</span></div>
               )}
               {q.solution && (
-                <div style={{ marginTop: isCorrect ? 0 : "0.65rem", color: "var(--ink2)" }}>
-                  <strong style={{ fontFamily: "DM Mono,monospace", fontSize: "0.68rem", letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)" }}>
+                <div style={{ marginTop: isCorrect ? 0 : "0.65rem", color:"var(--ink2)" }}>
+                  <strong style={{ fontFamily:"DM Mono,monospace", fontSize:"0.68rem", letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)" }}>
                     Explanation
                   </strong>
-                  <p style={{ marginTop: "0.3rem" }}>{q.solution}</p>
+                  <p style={{ marginTop:"0.3rem" }}>{q.solution}</p>
                 </div>
               )}
-              <div className="score-nudge" style={{ marginTop: "0.5rem" }}>
-                Score: <span>{displayScore}/{MASTERY_THRESHOLD}</span>
-                {" — "}
-                {displayScore >= MASTERY_THRESHOLD ? "🌟 Mastered!" : `${MASTERY_THRESHOLD - displayScore} more to master`}
-              </div>
+              {!isRecall && (
+                <div className="score-nudge" style={{ marginTop:"0.5rem" }}>
+                  Score: <span>{displayScore}/{MASTERY_THRESHOLD}</span>
+                  {" — "}
+                  {displayScore >= MASTERY_THRESHOLD ? "🌟 Mastered!" : `${MASTERY_THRESHOLD - displayScore} more to master`}
+                </div>
+              )}
+              {isRecall && (
+                <div className="score-nudge" style={{ marginTop:"0.5rem", color:"var(--gold)" }}>
+                  ⭐ Recall question — already mastered. Keep it sharp!
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -1045,7 +1012,7 @@ function MasterySession({ subject, fileName, allQuestions, onExit, toast }) {
         <div className="next-row">
           {answered && (
             <button className="btn btn-red" onClick={next}>
-              {qi + 1 >= queue.current.length ? "See Results →" : "Next →"}
+              {qi + 1 >= queue.length ? "Finish Set →" : "Next →"}
             </button>
           )}
         </div>
