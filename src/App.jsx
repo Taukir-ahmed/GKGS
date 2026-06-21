@@ -241,6 +241,50 @@ function shuffle(arr) {
 }
 
 // ============================================================
+// UTILS
+// ============================================================
+// ... your existing parseCSVLine and shuffle functions ...
+
+function exportToCSV(filename, rows) {
+  const escape = (str) => {
+    if (!str) return "";
+    const s = String(str);
+    // If the string contains quotes, commas, or line breaks, wrap it in quotes and double-escape internal quotes
+    if (s.includes(",") || s.includes('"') || s.includes("\n")) {
+      return `"${s.replace(/"/g, '""')}"`;
+    }
+    return s;
+  };
+
+  const header = ["Question", "Option A", "Option B", "Option C", "Option D", "Correct Answer", "Solution"];
+  const lines = [header.join(",")];
+
+  for (const r of rows) {
+    lines.push([
+      r.question,
+      r.optionA,
+      r.optionB,
+      r.optionC,
+      r.optionD,
+      r.correct,
+      r.solution
+    ].map(escape).join(","));
+  }
+
+  const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+  const link = document.createElement("a");
+  const url = URL.createObjectURL(blob);
+  
+  link.setAttribute("href", url);
+  link.setAttribute("download", filename.endsWith('.csv') ? filename : `${filename}.csv`);
+  link.style.visibility = "hidden";
+  
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+}
+
+// ============================================================
 // TOAST
 // ============================================================
 function useToast() {
@@ -1015,7 +1059,23 @@ function TopicListView({ subject, onSelectTopic, onBack, onUpload, toast }) {
     toast(`Deleted "${fileName}"`, "info");
     setTopics(prev => prev.filter(t => t !== fileName));
   };
-
+  
+const handleDownload = async (e, fileName) => {
+    e.stopPropagation();
+    toast("Preparing download...", "info");
+    try {
+      const qs = await DB.getQuestionsForTopic(subject, fileName);
+      if (!qs || qs.length === 0) {
+        toast("No questions to download", "error");
+        return;
+      }
+      exportToCSV(fileName, qs);
+      toast(`Downloaded "${fileName}"`, "success");
+    } catch (err) {
+      toast("Download failed: " + err.message, "error");
+    }
+  };
+  
   return (
     <div className="page">
       {/* Upload */}
@@ -1082,6 +1142,12 @@ function TopicListView({ subject, onSelectTopic, onBack, onUpload, toast }) {
                     onClick={(e) => { e.stopPropagation(); onSelectTopic(fileName); }}
                   >
                     {allMastered ? "🌟 Review" : "Study →"}
+                  </button>
+                  <button 
+                    className="btn btn-ghost btn-sm" 
+                    onClick={(e) => handleDownload(e, fileName)}
+                  >
+                    ⬇️ Download
                   </button>
                   <button className="btn btn-danger btn-sm" onClick={(e) => handleDelete(e, fileName)}>
                     Delete
