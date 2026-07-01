@@ -897,16 +897,30 @@ function QuestionCard({ q, qNum, scores, onAnswer }) {
   );
 }
 
+const BROWSE_PAGE_SIZE = 10;
+
 function MasterySession({ subject, fileName, allQuestions, onExit, toast }) {
   const topicTitle = fileName.replace(/\.csv$/i, "");
   const ids        = allQuestions.map(q => q.id);
   const topRef     = useRef(null);
+  const loaderRef  = useRef(null);
 
   const [queue,    setQueue]    = useState([]);
   const [scores,   setScores]   = useState({});
   const [saving,   setSaving]   = useState(false);
   // key forces full remount of all QuestionCards on each generate
   const [genKey,   setGenKey]   = useState(0);
+
+  // "practice" = random weighted 10-question sets (existing behaviour)
+  // "browse"   = every question in the topic, loaded 10 at a time on scroll
+  const [mode, setMode] = useState("practice");
+  const [browseQuestions] = useState(() =>
+    allQuestions.map(q => ({
+      ...q,
+      options: shuffle([q.optionA, q.optionB, q.optionC, q.optionD].filter(Boolean)),
+    }))
+  );
+  const [visibleCount, setVisibleCount] = useState(BROWSE_PAGE_SIZE);
 
   useEffect(() => {
     ScoreStore.seed(allQuestions);
@@ -923,6 +937,33 @@ function MasterySession({ subject, fileName, allQuestions, onExit, toast }) {
     topRef.current?.scrollIntoView({ behavior: "smooth" });
   }
 
+  function enterBrowseMode() {
+    setMode("browse");
+    setVisibleCount(BROWSE_PAGE_SIZE);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    topRef.current?.scrollIntoView({ behavior: "smooth" });
+  }
+
+  function exitBrowseMode() {
+    setMode("practice");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    topRef.current?.scrollIntoView({ behavior: "smooth" });
+  }
+
+  // Load 10 more browse questions whenever the sentinel scrolls into view
+  useEffect(() => {
+    if (mode !== "browse") return;
+    const el = loaderRef.current;
+    if (!el) return;
+    const obs = new IntersectionObserver((entries) => {
+      if (entries[0].isIntersecting) {
+        setVisibleCount(c => Math.min(c + BROWSE_PAGE_SIZE, browseQuestions.length));
+      }
+    }, { rootMargin: "500px" });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [mode, browseQuestions.length]);
+
   // Called by each QuestionCard after answering — update parent scores state
   const handleAnswer = (id, newScore) => {
     setScores(prev => ({ ...prev, [id]: newScore }));
@@ -931,7 +972,7 @@ function MasterySession({ subject, fileName, allQuestions, onExit, toast }) {
   const masteredCount   = ScoreStore.getMasteredCount(ids);
   const unmasteredCount = ids.length - masteredCount;
 
-  if (!queue.length) return <div className="spin" />;
+  if (mode === "practice" && !queue.length) return <div className="spin" />;
 
   return (
     <div className="session-shell">
@@ -941,7 +982,7 @@ function MasterySession({ subject, fileName, allQuestions, onExit, toast }) {
       <div className="session-topbar">
         <div>
           <div className="session-info-label">{subject} › {topicTitle}</div>
-          <div className="session-info-title">Practice</div>
+          <div className="session-info-title">{mode === "browse" ? "Browse All Questions" : "Practice"}</div>
         </div>
         <button className="btn btn-ghost btn-sm" onClick={onExit}>Exit ✕</button>
       </div>
@@ -975,37 +1016,88 @@ function MasterySession({ subject, fileName, allQuestions, onExit, toast }) {
             setSaving(false);
             setScores(ScoreStore.getAll(ids));
             toast("Scores reset!", "info");
-            generate();
+            if (mode === "practice") generate();
           }} disabled={saving}>{saving ? "…" : "↺ Reset"}</button>
-          <button className="btn btn-red" onClick={generate}>
-            🎲 Generate 10
-          </button>
+
+          {mode === "practice" ? (
+            <>
+              <button className="btn btn-ghost btn-sm" onClick={enterBrowseMode}>
+                📋 Show All ({allQuestions.length})
+              </button>
+              <button className="btn btn-red" onClick={generate}>
+                🎲 Generate 10
+              </button>
+            </>
+          ) : (
+            <button className="btn btn-red" onClick={exitBrowseMode}>
+              🎲 Back to Practice
+            </button>
+          )}
         </div>
       </div>
 
-      {/* ALL 10 QUESTIONS — rendered together, scroll through them */}
-      {queue.map((q, i) => (
-        <QuestionCard
-          key={`${genKey}-${q.id}-${i}`}
-          q={q}
-          qNum={i + 1}
-          scores={scores}
-          onAnswer={handleAnswer}
-        />
-      ))}
+      {/* PRACTICE MODE — 10 random-weighted questions, regenerate on demand */}
+      {mode === "practice" && (
+        <>
+          {queue.map((q, i) => (
+            <QuestionCard
+              key={`${genKey}-${q.id}-${i}`}
+              q={q}
+              qNum={i + 1}
+              scores={scores}
+              onAnswer={handleAnswer}
+            />
+          ))}
 
-      {/* BOTTOM GENERATE NUDGE — after scrolling through all 10 */}
-      <div style={{
-        textAlign:"center", padding:"2.5rem 1rem",
-        borderTop:"1px dashed var(--border2)", marginTop:"1rem",
-      }}>
-        <div style={{color:"var(--muted)", fontSize:"0.82rem", marginBottom:"1rem"}}>
-          Scrolled through all 10? Generate a fresh set.
-        </div>
-        <button className="btn btn-red" style={{padding:"0.7rem 2rem", fontSize:"0.95rem"}} onClick={generate}>
-          🎲 Generate Next 10
-        </button>
-      </div>
+          {/* BOTTOM GENERATE NUDGE — after scrolling through all 10 */}
+          <div style={{
+            textAlign:"center", padding:"2.5rem 1rem",
+            borderTop:"1px dashed var(--border2)", marginTop:"1rem",
+          }}>
+            <div style={{color:"var(--muted)", fontSize:"0.82rem", marginBottom:"1rem"}}>
+              Scrolled through all 10? Generate a fresh set.
+            </div>
+            <button className="btn btn-red" style={{padding:"0.7rem 2rem", fontSize:"0.95rem"}} onClick={generate}>
+              🎲 Generate Next 10
+            </button>
+          </div>
+        </>
+      )}
+
+      {/* BROWSE MODE — every question in the topic, loaded 10 at a time as you scroll */}
+      {mode === "browse" && (
+        <>
+          {browseQuestions.slice(0, visibleCount).map((q, i) => (
+            <QuestionCard
+              key={`browse-${q.id}`}
+              q={q}
+              qNum={i + 1}
+              scores={scores}
+              onAnswer={handleAnswer}
+            />
+          ))}
+
+          {visibleCount < browseQuestions.length ? (
+            <div ref={loaderRef} style={{ textAlign: "center", padding: "2rem 1rem" }}>
+              <div className="spin" style={{ margin: "0 auto 0.75rem" }} />
+              <div style={{
+                fontFamily: "DM Mono,monospace", fontSize: "0.68rem",
+                color: "var(--muted)", letterSpacing: "0.05em",
+              }}>
+                Loading more… ({visibleCount}/{browseQuestions.length})
+              </div>
+            </div>
+          ) : (
+            <div style={{
+              textAlign: "center", padding: "2.5rem 1rem",
+              borderTop: "1px dashed var(--border2)", marginTop: "1rem",
+              fontFamily: "DM Mono,monospace", fontSize: "0.75rem", color: "var(--muted)",
+            }}>
+              ✓ All {browseQuestions.length} questions loaded
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }
